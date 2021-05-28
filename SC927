@@ -1,0 +1,290 @@
+import requests
+import hashlib
+import json
+import time
+import uuid
+from StringIO import StringIO
+from PIL import Image
+
+from datetime import datetime
+from Crypto.Cipher import AES
+
+
+class Snapchat(object):
+    URL =                       'https://feelinsonice-hrd.appspot.com/'
+    GENERAL_PATH_EXTENSION =    'bq'
+    LOGIN_PATH_EXTENSION =      'loq'
+    SEND_PATH_EXTENSION =       'ph'
+    SECRET =                    'iEk21fuwZApXlz93750dmW22pw389dPwOk'        # API Secret
+    STATIC_TOKEN =              'm198sOkJEn37DjqZ32lpRu76xmw288xSQ9'        # API Static Token
+    BLOB_ENCRYPTION_KEY =       'M02cnQ51Ji97vwT4'                          # Blob Encryption Key
+    HASH_PATTERN =              '0001110111101110001111010101111011010001001110011000110001000110'; # Hash pattern
+    HEADERS = {
+                                'User-Agent':'Snapchat/9.6.0 (iPhone; iOS 9.6.0; gzip)',
+                                'Accept-Language':'en',
+                                'Accept-Locale':'en_US'
+    }
+    SNAPCHAT_VERSION =          '9.6.0'                                     # Snapchat Application Version
+
+    MEDIA_IMAGE =                        0  # Media: Image
+    MEDIA_VIDEO =                        1  # Media: Video
+    MEDIA_VIDEO_NOAUDIO =                2  # Media: Video without audio
+    MEDIA_FRIEND_REQUEST =               3  # Media: Friend Request
+    MEDIA_FRIEND_REQUEST_IMAGE =         4  # Media: Image from unconfirmed friend
+    MEDIA_FRIEND_REQUEST_VIDEO =         5  # Media: Video from unconfirmed friend
+    MEDIA_FRIEND_REQUEST_VIDEO_NOAUDIO = 6  # Media: Video without audio from unconfirmed friend
+
+    STATUS_NONE =                       -1  # Snap status: None
+    STATUS_SENT =                        0  # Snap status: Sent
+    STATUS_DELIVERED =                   1  # Snap status: Delivered
+    STATUS_OPENED =                      2  # Snap status: Opened
+    STATUS_SCREENSHOT =                  3  # Snap status: Screenshot
+
+    FRIEND_CONFIRMED =                   0  # Friend status: Confirmed
+    FRIEND_UNCONFIRMED =                 1  # Friend status: Unconfirmed
+    FRIEND_BLOCKED =                     2  # Friend status: Blocked
+    FRIEND_DELETED =      PRIVACY_EVERYONE =                   0  # Privacy setting: Accept snaps from everyone
+    PRIVACY_FRIENDS =                    1  # Privacy setting: Accept snaps only from friends
+
+    # Optionally log in during initialization 
+    def __init__(self, username=None, password=None):
+        self.username = None
+        self.auth_token = None
+        self.logged_in = False
+
+        # Generate a cipher for encrypting/decrypting media files
+        self.cipher = AES.new(Snapchat.BLOB_ENCRYPTION_KEY, AES.MODE_ECB)
+
+        if username and password:
+            self.login(username, password)
+
+########################################
+######## WORKING CLIENT METHODS ########
+########################################
+
+    # Attempts to register a new user with the specified information
+    def register(self, username, password, email, birthday):
+        # birthday should be a string of form "yyyy-mm-dd"
+
+        data = {
+            'birthday': birthday,
+            'password': password,
+            'email': email
+        }
+
+        # Perform email/password registration.
+        result = self._post('/register', data, Snapchat.STATIC_TOKEN)
+
+        if 'auth_token' in result:
+            self.auth_token = result["auth_token"]
+            self.username = username
+            self.logged_in = True
+            print "Registration Successful For User: " + username + "\n"
+            return True
+        else:
+            print "Registration Failed For User: " + username
+            print "With Error:\n"
+            print result
+            return False
+
+    # Attempts to login using the specified credentials
+    def login(self, username, password):
+
+        if self.logged_in:     return True
+
+        data = {
+            'username': username,
+            'password': password
+        }
+
+        result = self._post('/login', data, Snapchat.STATIC_TOKEN)
+        try: 
+            if 'auth_token' in result and 'username' in result:
+                self.logged_in = True
+                self.username = result['username']
+                self.auth_token = result['auth_token']
+                print "Login Successful\n"
+                return True
+            else:
+                print "Login Failed"
+                print "With Error:\n"
+                print result
+                return False      
+        except:
+            print "No JSON Returned"
+            print "Login Failed"
+            print "With Error:\n"
+            print result
+            return False
+        
+
+
+    # Attempts to logout of the current session
+    def logout(self):
+
+        if not self.logged_in:
+            return True
+
+        data = {
+            'username': self.username
+        }
+
+        result = self._post('/logout', data, self.auth_token)
+        if result:
+            print "Logout Unsuccessful"
+            print "With Error:\n"
+            print result
+            return False
+        else:
+            self.logged_in = False
+            self.username = None
+            self.auth_token = None
+            print "Logout Successful\n"
+            return True
+
+
+    # Attempts to upload a file to the Snapchat servers
+    def upload(self, media_type, filename):
+        # Use a predefined media type, i.e. Snapchat.MEDIA_IMAGE
+        # Use the full file path (including extension)
+        # Upon successful upload, the file can be sent to a user by calling send
+
+        if not self.logged_in: raise Exception("No User Logged In")
+
+        # Before being sent to another user, Snaps are identified by media_id
+        media_id = self.username.upper() + '~' + str(uuid.uuid4())
+
+        data = {
+            'media_id': media_id,
+            'type': media_type,
+            'username': self.username
+        }
+
+        encrypted_media = self._encrypt_media(filename)
+
+        result = self._post('/upload', data, self.auth_token, encrypted_media)
+        if result:
+            print "Upload Unsuccessful"
+            print "With Error:\n"
+            print result
+            return False
+        else:
+            print "Upload Successful\n"
+            return media_id
+
+
+    # Sends a previously uploaded media file to the specified users
+    def send(self, media_id, media_type, recipients, time=10):
+        # Call upload to get a media_id
+        # recipients: the recipients username as a string (single recipient) or list of strings (multiple recipients)
+        # time: allotted viewing time for image
+
+        if not self.logged_in: raise Exception("No User Logged In")
+
+        # If only one recipient, convert it to a list.
+        if not isinstance(recipients, list):
+            recipients = [recipients]
+
+        data = {
+            'media_id': media_id,
+            'recipient': ','.join(recipients),
+            'time': time,
+            'username': self.username,
+            'type':media_type
+        }
+
+        result = self._post('/send', data, self.auth_token)
+        if result:
+            print "Sending Snap Failed"
+            print "With Error:"
+            print result
+            return False
+        else:
+            print "Sending Snap Succeeded\n"
+            return True
+
+
+    # Adds a previously uploaded media file to the logged in user's story
+    def add_story(self, media_id, media_type, time=10):
+        # Call upload to get a media_id
+        # time: allotted viewing time for image
+
+        if not self.logged_in: raise Exception("No User Logged In")
+
+        data = {
+            'client_id': media_id,
+            'media_id': media_id,
+            'time': time,
+            'username': self.username,
+            'type': media_type
+        }
+
+        result = self._post('/post_story', data, self.auth_token)
+        
+        if isinstance(result, dict): 
+            print "Add Story Successful\n"
+            return True
+        else:
+            print "Add Story Failed"
+            print "With Error:\n"
+            print result
+            return False
+
+
+    # Returns giant list of meta-data pertaining to the user
+    def get_updates(self):
+
+        if not self.logged_in: raise Exception("No User Logged In")
+
+        data = {
+            'username': self.username
+        }
+
+        result = self._post('/all_updates', data, self.auth_token)
+        if isinstance(result, dict): 
+            print "Update Request Successful\n"
+            return result
+        else:
+            print "Update Request Failed"
+            print "With Error:\n"
+            print result
+            return False
+
+
+    # Returns meta-data pertaining to the user's recent snaps (sent and received)
+    def get_snaps(self):
+
+        updates = self.get_updates()
+
+        if not updates:
+            print "Snap Data Request Failed"
+            return False
+
+        snaps = updates['updates_response']['snaps']
+        result = []
+
+        for snap in snaps:
+            # Make the fields more readable.
+            snap_readable = {
+                'id': self._parse_field(snap, 'id'),
+                'media_id': self._parse_field(snap, 'c_id'),
+                'media_type': self._parse_field(snap, 'm'),
+                'time': self._parse_field(snap, 't'),
+                'sender': self._parse_field(snap, 'sn'),
+                'recipient': self._parse_field(snap, 'rp'),
+                'status': self._parse_field(snap, 'st'),
+                'screenshot_count': self._parse_field(snap, 'c'),
+                'sent': self._parse_datetime(snap['sts']),
+                'opened': self._parse_datetime(snap['ts'])
+            }
+            result.append(snap_readable)
+
+        print "Snap Data Request Successful\n"
+        return result
+
+
+    # Returns meta-data pertaining to the user's, and their friends', stories
+    def get_stories(self):
+
+        if not self.logged_in: raise Exception("No User Logged In")           3  # Friend status: Deleted
+---
